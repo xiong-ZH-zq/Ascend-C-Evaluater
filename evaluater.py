@@ -17,9 +17,8 @@ import importlib.util
 import numpy as np
 import torch
 
-from dataset import dataset, category2exampleop
 from config import (
-    project_root_path, op_base_path, ref_impl_base_path,
+    project_root_path, op_base_path,
     num_correct_trials, num_perf_trials, num_warmup,
     atol, rtol, seed_num, device_type, device_id
 )
@@ -34,42 +33,41 @@ except ImportError:
     torch_npu = None
 
 
-def load_reference_implementation(reference_name):
+def load_standard_implementation(op_name):
     """
-    Dynamically load reference implementation module.
+    Dynamically load standard PyTorch implementation module from op directory.
 
     Args:
-        reference_name: Name of the reference implementation (e.g., 'matmul')
+        op_name: Name of the operator (e.g., 'matmul', 'add')
 
     Returns:
         module: Loaded module containing Model, get_inputs, get_init_inputs
     """
-    ref_path = os.path.join(ref_impl_base_path, f'{reference_name}.py')
-    if not os.path.exists(ref_path):
-        raise FileNotFoundError(f"Reference implementation not found: {ref_path}")
+    standard_path = os.path.join(op_base_path, op_name, f'{op_name}_standard.py')
+    if not os.path.exists(standard_path):
+        raise FileNotFoundError(f"Standard implementation not found: {standard_path}")
 
-    spec = importlib.util.spec_from_file_location(reference_name, ref_path)
+    spec = importlib.util.spec_from_file_location(f'{op_name}_standard', standard_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
     # Verify required components
     if not hasattr(module, 'Model'):
-        raise AttributeError(f"Reference module must define 'Model' class")
+        raise AttributeError(f"Standard module must define 'Model' class")
     if not hasattr(module, 'get_inputs'):
-        raise AttributeError(f"Reference module must define 'get_inputs' function")
+        raise AttributeError(f"Standard module must define 'get_inputs' function")
     if not hasattr(module, 'get_init_inputs'):
-        raise AttributeError(f"Reference module must define 'get_init_inputs' function")
+        raise AttributeError(f"Standard module must define 'get_init_inputs' function")
 
     return module
 
 
-def evaluate_operator(op_name, reference_name, runs=1):
+def evaluate_operator(op_name, runs=1):
     """
     Evaluate a single operator.
 
     Args:
         op_name: Name of the operator to evaluate
-        reference_name: Name of the reference implementation
         runs: Number of evaluation runs
 
     Returns:
@@ -77,13 +75,11 @@ def evaluate_operator(op_name, reference_name, runs=1):
     """
     print(f"\n{'='*80}")
     print(f"Evaluating operator: {op_name}")
-    print(f"Reference: {reference_name}")
     print(f"Runs: {runs}")
     print(f"{'='*80}\n")
 
     result = {
         'operator': op_name,
-        'reference': reference_name,
         'compiled': False,
         'correctness': None,
         'performance': None,
@@ -107,21 +103,21 @@ def evaluate_operator(op_name, reference_name, runs=1):
 
     print("[PASS] Compilation succeeded\n")
 
-    # Step 2: Load reference implementation
-    print(f"[STEP 2] Loading reference implementation: {reference_name}")
+    # Step 2: Load standard PyTorch implementation
+    print(f"[STEP 2] Loading standard PyTorch implementation: {op_name}_standard.py")
 
     try:
-        ref_module = load_reference_implementation(reference_name)
-        print("[PASS] Reference loaded successfully\n")
+        standard_module = load_standard_implementation(op_name)
+        print("[PASS] Standard implementation loaded successfully\n")
     except Exception as e:
-        result['correctness_info'] = f"Failed to load reference: {str(e)}"
+        result['correctness_info'] = f"Failed to load standard implementation: {str(e)}"
         print(f"[FAIL] {result['correctness_info']}")
         return result
 
     # Step 3: Run C++ test and collect metrics
     print(f"[STEP 3] Running C++ operator test")
 
-    cpp_success, cpp_result = run_cpp_test(op_path, num_trials=1)
+    cpp_success, cpp_result = run_cpp_test(op_path, num_trials=runs)
 
     if not cpp_success:
         result['correctness_info'] = f"C++ test failed: {cpp_result}"
@@ -137,8 +133,6 @@ def evaluate_operator(op_name, reference_name, runs=1):
             return result
 
         print("[INFO] C++ test passed")
-        if 'execution_times' in cpp_result:
-            print(f"[INFO] C++ execution time: {cpp_result['mean_time']:.3f} ms")
 
     # Step 4: Run PyTorch reference and compare
     print(f"\n[STEP 4] Running PyTorch reference for comparison")
@@ -156,25 +150,25 @@ def evaluate_operator(op_name, reference_name, runs=1):
 
     # Get model and inputs
     try:
-        get_init_inputs = ref_module.get_init_inputs
-        get_inputs = ref_module.get_inputs
-        Model = ref_module.Model
+        get_init_inputs = standard_module.get_init_inputs
+        get_inputs = standard_module.get_inputs
+        Model = standard_module.Model
 
         init_inputs = get_init_inputs()
         init_inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in init_inputs]
 
         set_seed(seed_num)
-        reference_model = Model(*init_inputs).to(device)
+        standard_model = Model(*init_inputs).to(device)
 
-        print("[PASS] Reference model initialized\n")
+        print("[PASS] Standard model initialized\n")
 
     except Exception as e:
-        result['correctness_info'] = f"Failed to initialize reference model: {str(e)}"
+        result['correctness_info'] = f"Failed to initialize standard model: {str(e)}"
         print(f"[FAIL] {result['correctness_info']}")
         return result
 
-    # Step 5: Measure reference performance
-    print(f"[STEP 5] Measuring reference performance ({num_perf_trials} trials)")
+    # Step 5: Measure standard PyTorch performance
+    print(f"[STEP 5] Measuring standard PyTorch performance ({runs} trials)")
 
     try:
         # Generate test inputs
@@ -183,27 +177,42 @@ def evaluate_operator(op_name, reference_name, runs=1):
         test_inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in test_inputs]
 
         # Measure performance
-        ref_perf = measure_pytorch_performance(
-            reference_model, test_inputs, device,
-            num_warmup=num_warmup, num_trials=num_perf_trials
+        standard_perf = measure_pytorch_performance(
+            standard_model, test_inputs, device,
+            num_warmup=num_warmup, num_trials=runs
         )
 
-        result['performance'] = {
-            'reference': ref_perf,
-            'custom': cpp_result.get('execution_times', None)
+        # Extract custom operator results
+        custom_perf = {
+            'raw_data': cpp_result.get('raw_data', []),
+            'statistics': cpp_result.get('statistics', {})
         }
 
-        print(f"[INFO] Reference performance:")
-        print(f"  Mean: {ref_perf['mean']:.3f} ms")
-        print(f"  Std:  {ref_perf['std']:.3f} ms")
-        print(f"  Min:  {ref_perf['min']:.3f} ms")
-        print(f"  Max:  {ref_perf['max']:.3f} ms")
+        result['performance'] = {
+            'standard': standard_perf,
+            'custom': custom_perf
+        }
 
-        # Calculate speedup if we have custom timing
-        if 'mean_time' in cpp_result:
-            speedup = ref_perf['mean'] / cpp_result['mean_time']
-            result['speedup'] = speedup
-            print(f"\n[INFO] Speedup: {speedup:.2f}x")
+        # Print standard performance
+        std_stats = standard_perf.get('statistics', {})
+        print(f"[INFO] Standard PyTorch performance:")
+        print(f"  Mean:   {std_stats.get('mean', 0):.3f} ms")
+        print(f"  Median: {std_stats.get('median', 0):.3f} ms")
+        print(f"  Std:    {std_stats.get('std', 0):.3f} ms")
+        print(f"  Min:    {std_stats.get('min', 0):.3f} ms")
+        print(f"  Max:    {std_stats.get('max', 0):.3f} ms")
+
+        # Calculate speedup using both mean and median
+        custom_stats = custom_perf.get('statistics', {})
+        if custom_stats:
+            speedup_mean = std_stats.get('mean', 0) / custom_stats.get('mean', 1)
+            speedup_median = std_stats.get('median', 0) / custom_stats.get('median', 1)
+            result['speedup'] = {
+                'mean': speedup_mean,
+                'median': speedup_median
+            }
+            print(f"\n[INFO] Speedup (based on mean):   {speedup_mean:.2f}x")
+            print(f"[INFO] Speedup (based on median): {speedup_median:.2f}x")
         else:
             print(f"\n[WARNING] No custom operator timing available, cannot calculate speedup")
 
@@ -231,7 +240,11 @@ def evaluate_operator(op_name, reference_name, runs=1):
     print("Evaluation Summary:")
     print(f"  Compiled: {result['compiled']}")
     print(f"  Correctness: {result['correctness']}")
-    print(f"  Speedup: {result['speedup']:.2f}x" if result['speedup'] else "  Speedup: N/A")
+    if result['speedup'] and isinstance(result['speedup'], dict):
+        print(f"  Speedup (mean):   {result['speedup'].get('mean', 'N/A'):.2f}x")
+        print(f"  Speedup (median): {result['speedup'].get('median', 'N/A'):.2f}x")
+    else:
+        print(f"  Speedup: N/A")
     print(f"{'='*80}\n")
 
     return result
@@ -243,15 +256,13 @@ if __name__ == '__main__':
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python evaluater.py --op matmul --reference matmul --runs 5
-  python evaluater.py --op matmul --reference matmul --output results.json
+  python evaluater.py --op matmul --runs 5
+  python evaluater.py --op add --output results.json
         """
     )
 
     parser.add_argument('--op', type=str, required=True,
                         help='Operator name (must exist in op/ directory)')
-    parser.add_argument('--reference', type=str, required=True,
-                        help='Reference implementation name (must exist in reference/ directory)')
     parser.add_argument('--runs', type=int, default=1,
                         help='Number of evaluation runs (default: 1)')
     parser.add_argument('--output', type=str, default=None,
@@ -270,19 +281,15 @@ Examples:
                     print(f"  - {item}")
         sys.exit(1)
 
-    # Validate reference exists
-    ref_path = os.path.join(ref_impl_base_path, f'{args.reference}.py')
-    if not os.path.exists(ref_path):
-        print(f"[ERROR] Reference not found: {ref_path}")
-        print(f"[ERROR] Available references in {ref_impl_base_path}:")
-        if os.path.exists(ref_impl_base_path):
-            for item in os.listdir(ref_impl_base_path):
-                if item.endswith('.py') and item != '__init__.py':
-                    print(f"  - {item[:-3]}")
+    # Validate standard implementation exists
+    standard_path = os.path.join(op_path, f'{args.op}_standard.py')
+    if not os.path.exists(standard_path):
+        print(f"[ERROR] Standard implementation not found: {standard_path}")
+        print(f"[ERROR] Each operator directory must contain a '{args.op}_standard.py' file")
         sys.exit(1)
 
     # Run evaluation
-    result = evaluate_operator(args.op, args.reference, args.runs)
+    result = evaluate_operator(args.op, args.runs)
 
     # Save results
     output_file = args.output or f'result_{args.op}.json'

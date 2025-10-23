@@ -7,7 +7,6 @@ import os
 # Project paths
 project_root_path = os.path.dirname(os.path.abspath(__file__))
 op_base_path = os.path.join(project_root_path, 'op')
-ref_impl_base_path = os.path.join(project_root_path, 'reference')
 
 # Evaluation configuration
 num_correct_trials = 5       # Number of correctness validation runs

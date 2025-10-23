@@ -92,17 +92,19 @@ def build_operator(op_path):
         os.chdir(original_dir)
 
 
-def run_cpp_test(op_path, num_trials=1):
+def run_cpp_test(op_path, num_trials=100):
     """
     Run the Python test for an operator (using pybind11 module).
 
     Args:
         op_path: Path to the operator directory
-        num_trials: Number of times to run the test
+        num_trials: Number of performance measurement trials
 
     Returns:
         tuple: (success: bool, results: dict or error_message: str)
     """
+    import json
+
     build_dir = os.path.join(op_path, 'build')
 
     if not os.path.exists(build_dir):
@@ -115,18 +117,29 @@ def run_cpp_test(op_path, num_trials=1):
 
     test_file = os.path.join(op_path, test_files[0])
     print(f"[INFO] Running Python test: {test_file}")
+    print(f"[INFO] Performance trials: {num_trials}")
 
     original_dir = os.getcwd()
 
     try:
         os.chdir(build_dir)
 
+        # Remove old timing results if they exist
+        timing_file = os.path.join(build_dir, 'timing_results.json')
+        if os.path.exists(timing_file):
+            os.remove(timing_file)
+
+        # Set environment variable for num_trials
+        env = os.environ.copy()
+        env['PERF_NUM_TRIALS'] = str(num_trials)
+
         # Run the test file
         result = subprocess.run(
             ['python3', test_file],
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=120,
+            env=env
         )
 
         # Parse output for correctness
@@ -143,10 +156,24 @@ def run_cpp_test(op_path, num_trials=1):
 
         results = {
             'correctness': correctness,
-            'num_trials': 1,
+            'num_trials': num_trials,
             'stdout': result.stdout,
             'stderr': result.stderr
         }
+
+        # Try to read timing results from JSON file
+        if os.path.exists(timing_file):
+            try:
+                with open(timing_file, 'r') as f:
+                    timing_data = json.load(f)
+                    results.update(timing_data)
+                    stats = timing_data.get('statistics', {})
+                    if stats:
+                        print(f"[INFO] Custom operator timing:")
+                        print(f"       Mean: {stats.get('mean', 0):.3f} ms")
+                        print(f"       Median: {stats.get('median', 0):.3f} ms")
+            except Exception as e:
+                print(f"[WARNING] Failed to load timing results: {str(e)}")
 
         return True, results
 
@@ -170,8 +197,10 @@ def measure_pytorch_performance(model, inputs, device, num_warmup=3, num_trials=
         num_trials: Number of measurement iterations
 
     Returns:
-        dict: Performance metrics
+        dict: Performance metrics with raw_data and statistics
     """
+    import time
+
     model = model.to(device)
     inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in inputs]
 
@@ -188,7 +217,11 @@ def measure_pytorch_performance(model, inputs, device, num_warmup=3, num_trials=
     elapsed_times = []
 
     if NPU_AVAILABLE and device.type == 'npu':
-        for _ in range(num_trials):
+        for i in range(num_trials):
+            # Clear cache before each measurement
+            torch_npu.npu.empty_cache()
+            torch_npu.npu.synchronize(device=device)
+
             start_event = torch_npu.npu.Event(enable_timing=True)
             end_event = torch_npu.npu.Event(enable_timing=True)
 
@@ -200,21 +233,49 @@ def measure_pytorch_performance(model, inputs, device, num_warmup=3, num_trials=
             torch_npu.npu.synchronize(device=device)
             elapsed_time_ms = start_event.elapsed_time(end_event)
             elapsed_times.append(elapsed_time_ms)
+
+            # Progress indicator
+            if (i + 1) % 10 == 0 or (i + 1) == num_trials:
+                print(f"[PERF] Standard PyTorch: Completed {i + 1}/{num_trials} trials")
     else:
         # Fallback to CPU timing
-        for _ in range(num_trials):
+        for i in range(num_trials):
+            # Clear cache if CUDA is available
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize(device=device)
+
             with torch.no_grad():
                 start_time = time.time()
                 _ = model(*inputs)
                 end_time = time.time()
                 elapsed_times.append((end_time - start_time) * 1000)  # Convert to ms
 
+            # Progress indicator
+            if (i + 1) % 10 == 0 or (i + 1) == num_trials:
+                print(f"[PERF] Standard implementation: Completed {i + 1}/{num_trials} trials")
+
+    # Calculate statistics
+    elapsed_times_sorted = sorted(elapsed_times)
+    mean_val = float(np.mean(elapsed_times))
+
+    # Calculate median
+    n = len(elapsed_times_sorted)
+    if n % 2 == 0:
+        median_val = (elapsed_times_sorted[n//2 - 1] + elapsed_times_sorted[n//2]) / 2
+    else:
+        median_val = elapsed_times_sorted[n//2]
+
     return {
-        'mean': float(np.mean(elapsed_times)),
-        'std': float(np.std(elapsed_times)),
-        'min': float(np.min(elapsed_times)),
-        'max': float(np.max(elapsed_times)),
-        'num_trials': num_trials
+        'raw_data': elapsed_times,
+        'statistics': {
+            'mean': mean_val,
+            'median': float(median_val),
+            'std': float(np.std(elapsed_times)),
+            'min': float(np.min(elapsed_times)),
+            'max': float(np.max(elapsed_times)),
+            'num_trials': num_trials
+        }
     }
 
 
