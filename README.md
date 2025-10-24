@@ -11,10 +11,114 @@ This project is a modular evaluation framework for Ascend C operators, similar t
 - ✅ **Comprehensive Evaluation**: Tests compilation, correctness, and performance
 - ✅ **Minimal Code**: Add new operators with minimal boilerplate
 
+## Environment Setup
+
+### Prerequisites
+
+1. **Ascend CANN Toolkit**: Install CANN toolkit 8.2.RC1 or compatible version
+   - Download from [Ascend Community](https://www.hiascend.com/software/cann)
+   - Follow official installation guide for your system
+
+2. **Python 3.9+**: Recommended Python 3.9 or higher
+
+3. **CMake**: Version 3.16.0 or higher for building operators
+
+### Installation Steps
+
+#### 1. Create Conda Environment
+
+```bash
+# Create a new conda environment
+conda create -n evaluater python=3.10
+conda activate evaluater
+```
+
+#### 2. Install PyTorch and torch_npu
+
+```bash
+# Install PyTorch 2.1.0
+pip install torch==2.1.0
+
+# Install torch_npu (ensure it matches your CANN version)
+# The torch_npu wheel is typically provided with CANN toolkit
+# Example for CANN 8.2.RC1:
+pip install torch_npu==2.1.0.post12
+```
+
+**Note**: `torch_npu` version must be compatible with both PyTorch and CANN toolkit versions. Refer to the [torch_npu compatibility matrix](https://gitee.com/ascend/pytorch).
+
+#### 3. Install Dependencies
+
+```bash
+# Install project dependencies
+pip install -r requirements.txt
+```
+
+#### 4. Set Environment Variables
+
+Add CANN toolkit paths to your environment:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export ASCEND_TOOLKIT_HOME=/path/to/Ascend/ascend-toolkit/8.2.RC1
+source ${ASCEND_TOOLKIT_HOME}/set_env.sh
+
+# Verify installation
+npu-smi info  # Should show NPU device information
+```
+
+#### 5. Verify Installation
+
+```bash
+# Test torch_npu installation
+python -c "import torch; import torch_npu; print(f'NPU available: {torch.npu.is_available()}')"
+
+# Should output: NPU available: True
+```
+
+### Quick Environment Setup Script
+
+```bash
+#!/bin/bash
+# setup_env.sh
+
+# Create and activate conda environment
+conda create -n evaluater python=3.8 -y
+conda activate evaluater
+
+# Install PyTorch and torch_npu
+pip install torch==2.1.0
+pip install torch_npu==2.1.0.post12
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set CANN environment (adjust path as needed)
+export ASCEND_TOOLKIT_HOME=/data1/Ascend/ascend-toolkit/8.2.RC1
+source ${ASCEND_TOOLKIT_HOME}/set_env.sh
+
+echo "Environment setup complete!"
+echo "Activate with: conda activate evaluater"
+```
+
+### Troubleshooting
+
+**Issue**: `ImportError: cannot import name 'torch_npu'`
+- **Solution**: Ensure torch_npu is installed and compatible with your PyTorch version
+
+**Issue**: `NPU device not found`
+- **Solution**: Check CANN toolkit installation and environment variables
+- Run `npu-smi info` to verify NPU is recognized
+
+**Issue**: CMake build errors
+- **Solution**: Ensure CMake 3.16+ is installed: `cmake --version`
+- Install with: `conda install cmake` or `pip install cmake`
+
 ## Project Structure
 
 ```bash
 ├── config.py                    # Configuration settings
+├── requirements.txt             # Python dependencies
 ├── dataset.py                   # (Optional) Operator registry - not required
 ├── evaluater.py                 # Main evaluation script
 ├── perf_test_base.py            # Performance testing base class
@@ -51,6 +155,7 @@ This project is a modular evaluation framework for Ascend C operators, similar t
 Run evaluation for an operator:
 
 ```shell
+conda activate evaluater
 python evaluater.py --op matmul --runs 10
 ```
 
@@ -78,6 +183,8 @@ Example output:
 
 Results saved to: result_matmul.json
 ```
+
+> If you use this project for LLM GPU Kernel generation, let LLM generate `{op}_custom.cpp` and `{op}_custom_tiling.cpp`.
 
 ## Adding a New Operator
 
